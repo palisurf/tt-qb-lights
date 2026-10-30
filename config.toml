@@ -232,6 +232,16 @@ warning_temp_threshold = 70
 # Pulsing speed in milliseconds (lower = faster pulse)
 pulse_speed_ms = 500
 
+# Enable rolling hardware effect when Tensix cores are actively computing
+enable_compute_effect = true
+
+# AICLK threshold in MHz above which compute effect activates (idle is 800 MHz)
+compute_clock_threshold_mhz = 800
+
+# OpenRGB hardware mode to activate while AICLK > compute_clock_threshold_mhz
+# Supported ASRock modes include: "Rainbow", "Spectrum Cycle", "Wave", "Water", "Neon", "Spring", "Stack", "Cram", "Scan", "Random", "Breathing"
+compute_mode = "Rainbow"
+
 [logging]
 # Log level: trace, debug, info, warn, error
 level = "info"

@@ -118,6 +118,21 @@ fn parse_device_info(device: &DeviceInfo) -> Result<Option<DeviceMetrics>> {
     // P150/P300C are Blackhole, but we could also check other fields
     let architecture = determine_architecture(&board_type);
 
+    // Parse AI clock (AICLK) in MHz if present in telemetry
+    let aiclk_mhz = telemetry
+        .additional_fields
+        .get("AICLK")
+        .or_else(|| telemetry.additional_fields.get("aiclk"))
+        .and_then(|v| {
+            let trimmed = v.trim();
+            if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
+                parse_hex_value(trimmed).ok().map(|f| f as u32)
+            } else {
+                trimmed.parse::<f32>().ok().map(|f| f as u32)
+            }
+        })
+        .unwrap_or(0);
+
     Ok(Some(DeviceMetrics {
         bus_id,
         architecture,
@@ -129,6 +144,7 @@ fn parse_device_info(device: &DeviceInfo) -> Result<Option<DeviceMetrics>> {
         gddr_temps,
         max_temp,
         power_utilization,
+        aiclk_mhz,
     }))
 }
 
@@ -237,6 +253,7 @@ mod tests {
                         "INPUT_POWER": "0x96",
                         "TDP": "0x12C",
                         "FAN_RPM": "0x0",
+                        "AICLK": "0x578",
                         "GDDR01_TEMP": "0x28",
                         "GDDR23_TEMP": "0x29"
                     }
@@ -253,6 +270,7 @@ mod tests {
         assert_eq!(metrics.asic_temp, 45.0);
         assert_eq!(metrics.power_watts, 150.0);
         assert_eq!(metrics.tdp_watts, 300.0);
+        assert_eq!(metrics.aiclk_mhz, 1400);
         assert_eq!(metrics.gddr_temps.len(), 2);
     }
 }

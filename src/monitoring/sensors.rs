@@ -34,6 +34,9 @@ struct HwmonDevice {
 
     /// Available power sensor indices
     power_indices: Vec<usize>,
+
+    /// Sysfs path to tt_aiclk (if exposed under device/tenstorrent/)
+    aiclk_path: Option<PathBuf>,
 }
 
 impl SensorsMonitor {
@@ -127,6 +130,7 @@ fn discover_tenstorrent_devices() -> Result<Vec<HwmonDevice>> {
             // Discover available sensors
             let temp_indices = discover_sensor_indices(&path, "temp")?;
             let power_indices = discover_sensor_indices(&path, "power")?;
+            let aiclk_path = discover_aiclk_path(&path);
 
             devices.push(HwmonDevice {
                 path,
@@ -135,6 +139,7 @@ fn discover_tenstorrent_devices() -> Result<Vec<HwmonDevice>> {
                 architecture,
                 temp_indices,
                 power_indices,
+                aiclk_path,
             });
         }
     }
@@ -235,6 +240,30 @@ fn discover_sensor_indices(hwmon_path: &Path, sensor_type: &str) -> Result<Vec<u
     Ok(indices)
 }
 
+/// Discover the `tt_aiclk` sysfs attribute under `<hwmon>/device/tenstorrent/<dev>/tt_aiclk`
+fn discover_aiclk_path(hwmon_path: &Path) -> Option<PathBuf> {
+    let tt_dir = hwmon_path.join("device").join("tenstorrent");
+    let entries = fs::read_dir(&tt_dir).ok()?;
+    for entry in entries.flatten() {
+        let candidate = entry.path().join("tt_aiclk");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Read AI clock frequency (MHz) from `tt_aiclk` if available
+fn read_aiclk_mhz(device: &HwmonDevice) -> u32 {
+    let Some(ref path) = device.aiclk_path else {
+        return 0;
+    };
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
 /// Read metrics from a single hwmon device
 fn read_device_metrics(device: &HwmonDevice) -> Result<DeviceMetrics> {
     // Read all temperature sensors
@@ -295,6 +324,9 @@ fn read_device_metrics(device: &HwmonDevice) -> Result<DeviceMetrics> {
     let fan_rpm = read_sensor_value(&device.path, "fan", 1, 1.0)
         .unwrap_or(0.0) as u32;
 
+    // Read AI clock speed (MHz)
+    let aiclk_mhz = read_aiclk_mhz(device);
+
     // Infer board type from architecture
     let board_type = match device.architecture.as_str() {
         "blackhole" => "p300c".to_string(),
@@ -314,6 +346,7 @@ fn read_device_metrics(device: &HwmonDevice) -> Result<DeviceMetrics> {
         gddr_temps,
         max_temp,
         power_utilization,
+        aiclk_mhz,
     })
 }
 

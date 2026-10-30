@@ -39,6 +39,9 @@ pub struct DeviceMetrics {
 
     /// Power utilization as percentage of TDP (0.0 to 1.0)
     pub power_utilization: f32,
+
+    /// AI clock speed (Tensix cores) in MHz
+    pub aiclk_mhz: u32,
 }
 
 impl DeviceMetrics {
@@ -55,6 +58,11 @@ impl DeviceMetrics {
         self.max_temp >= threshold
     }
 
+    /// Check if Tensix cores are actively computing (AICLK above idle threshold)
+    pub fn is_computing(&self, clock_threshold_mhz: u32) -> bool {
+        self.aiclk_mhz > clock_threshold_mhz
+    }
+
     /// Returns `true` when this reading looks like a genuine measurement, `false`
     /// when it matches a telemetry sentinel or is otherwise implausible.
     ///
@@ -63,7 +71,9 @@ impl DeviceMetrics {
     /// ~4294 W (u32::MAX microwatts). Feeding those into color mapping would drive
     /// garbage output, so callers use this to hold last-good instead.
     pub fn is_plausible(&self, sentinel_temp_c: f32, sentinel_power_w: f32) -> bool {
-        self.max_temp < sentinel_temp_c && self.power_watts < sentinel_power_w
+        self.max_temp < sentinel_temp_c
+            && self.power_watts < sentinel_power_w
+            && self.aiclk_mhz < 0xFFFF
     }
 }
 
@@ -83,6 +93,7 @@ mod tests {
             gddr_temps: vec![],
             max_temp,
             power_utilization: 0.0,
+            aiclk_mhz: 800,
         }
     }
 
@@ -101,6 +112,21 @@ mod tests {
     fn implausible_power_sentinel_fails() {
         // 4294 W = u32::MAX microwatts sentinel
         assert!(!metrics(47.0, 4294.0).is_plausible(150.0, 1000.0));
+    }
+
+    #[test]
+    fn implausible_aiclk_sentinel_fails() {
+        let mut m = metrics(47.0, 67.0);
+        m.aiclk_mhz = 0xFFFF;
+        assert!(!m.is_plausible(150.0, 1000.0));
+    }
+
+    #[test]
+    fn computing_threshold_check() {
+        let mut m = metrics(47.0, 67.0);
+        assert!(!m.is_computing(800));
+        m.aiclk_mhz = 1400;
+        assert!(m.is_computing(800));
     }
 
     #[test]

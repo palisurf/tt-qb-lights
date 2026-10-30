@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use std::process::Command;
 
 /// Capture the current active mode for a device
-fn capture_current_mode(device_id: u32) -> Option<String> {
+fn capture_current_mode(_device_id: u32) -> Option<String> {
     // Use openrgb --list-devices to get current device info
     let output = Command::new("openrgb")
         .arg("--list-devices")
@@ -108,6 +108,27 @@ impl OpenRgbCliController {
                 .args(&["--device", &self.device_id.to_string(), "--mode", "off"])
                 .output();
         }
+    }
+
+    /// Activate an OpenRGB hardware animation mode (e.g., "Rainbow", "Spectrum Cycle", "Wave")
+    pub fn set_mode(&mut self, mode: &str) -> Result<()> {
+        let output = Command::new("openrgb")
+            .args(&[
+                "--device",
+                &self.device_id.to_string(),
+                "--mode",
+                mode,
+            ])
+            .output()
+            .context("Failed to execute openrgb mode command")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("openrgb mode command failed: {}", stderr);
+        }
+
+        tracing::debug!("Activated OpenRGB hardware mode '{}'", mode);
+        Ok(())
     }
 }
 

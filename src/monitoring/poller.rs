@@ -32,6 +32,7 @@ pub struct PollPolicy {
 pub struct Display {
     pub color: RgbColor,
     pub brightness: f32,
+    pub compute_active: bool,
 }
 
 /// Classified outcome of one poll attempt. `Good` carries the already-mapped
@@ -98,10 +99,12 @@ impl PollController {
                         let fault_age = now.saturating_sub(fault_start);
                         if fault_age >= self.policy.fault_dim_after {
                             // Sustained fault: hold color, drop to the idle floor
-                            // so a stuck-bright bug is visually obvious.
+                            // and exit compute animation so a stuck-bright bug is
+                            // visually obvious.
                             Some(Display {
                                 color: good.color,
                                 brightness: self.policy.fault_brightness,
+                                compute_active: false,
                             })
                         } else {
                             // Brief fault: hold last-good unchanged.
@@ -188,6 +191,7 @@ mod controller_tests {
         Display {
             color: RgbColor::new(10, 20, 30),
             brightness,
+            compute_active: false,
         }
     }
 
@@ -245,6 +249,24 @@ mod controller_tests {
         let mut c = PollController::new(policy());
         assert_eq!(c.record(PollResult::Error, Duration::from_secs(0)), None);
     }
+
+    #[test]
+    fn sustained_fault_clears_compute_active() {
+        let mut c = PollController::new(policy());
+        let computing = Display {
+            color: RgbColor::new(10, 20, 30),
+            brightness: 0.9,
+            compute_active: true,
+        };
+        c.record(PollResult::Good(computing), Duration::from_secs(0));
+        // Brief fault preserves compute_active
+        let brief = c.record(PollResult::Timeout, Duration::from_secs(5)).unwrap();
+        assert!(brief.compute_active);
+        // Sustained fault clears compute_active and dims
+        let sustained = c.record(PollResult::Timeout, Duration::from_secs(36)).unwrap();
+        assert!(!sustained.compute_active);
+        assert_eq!(sustained.brightness, 0.1);
+    }
 }
 
 #[cfg(test)]
@@ -292,6 +314,7 @@ mod worker_tests {
             gddr_temps: vec![],
             max_temp: 45.0,
             power_utilization: 0.2,
+            aiclk_mhz: 800,
         }
     }
 

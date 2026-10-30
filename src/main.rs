@@ -109,8 +109,13 @@ async fn main() -> Result<()> {
     info!("Discovered {} Tenstorrent device(s)", initial_metrics.len());
     for metrics in &initial_metrics {
         info!(
-            "  Device {}: {} ({}) - Temp: {:.1}°C, Power: {:.1}W",
-            metrics.bus_id, metrics.board_type, metrics.architecture, metrics.max_temp, metrics.power_watts
+            "  Device {}: {} ({}) - Temp: {:.1}°C, Power: {:.1}W, AICLK: {} MHz",
+            metrics.bus_id,
+            metrics.board_type,
+            metrics.architecture,
+            metrics.max_temp,
+            metrics.power_watts,
+            metrics.aiclk_mhz
         );
     }
 
@@ -179,6 +184,8 @@ async fn main() -> Result<()> {
     let mut loop_count = 0u64;
     let mut last_log_time = Instant::now();
     let mut last_rgb_color: Option<(rgb::RgbColor, f32)> = None; // Track last color sent
+    let mut last_compute_active = false; // Track whether hardware compute mode is currently active
+    let mut last_max_aiclk_mhz = 0u32;
     let mut last_rgb_update = Instant::now(); // Track last RGB update time
     let min_rgb_update_interval = Duration::from_secs(5); // Minimum 5 seconds between updates
     let mut faulted = false; // for one-shot fault/recovery logging
@@ -207,11 +214,13 @@ async fn main() -> Result<()> {
                 } else {
                     loop_count += 1;
 
-                    // Find hottest device.
+                    // Find hottest device and highest Tensix clock speed across all devices.
                     let hottest = metrics
                         .iter()
                         .max_by(|a, b| a.max_temp.partial_cmp(&b.max_temp).unwrap())
                         .unwrap();
+                    let max_aiclk_mhz = metrics.iter().map(|m| m.aiclk_mhz).max().unwrap_or(0);
+                    last_max_aiclk_mhz = max_aiclk_mhz;
 
                     // Color from temperature.
                     let color = color_mapper.map_temperature(hottest.max_temp);
@@ -226,32 +235,50 @@ async fn main() -> Result<()> {
                     };
 
                     // Pulse when overheating.
-                    let final_brightness = if config.effects.enable_warning_pulse
-                        && hottest.max_temp >= config.effects.warning_temp_threshold
-                    {
+                    let is_overheating = config.effects.enable_warning_pulse
+                        && hottest.max_temp >= config.effects.warning_temp_threshold;
+                    let final_brightness = if is_overheating {
                         let pulse_phase = (loop_count as f32 * 0.1).sin() * 0.5 + 0.5;
                         brightness * (0.5 + pulse_phase * 0.5)
                     } else {
                         brightness
                     };
 
+                    // Activate rolling compute effect when any chip's AICLK exceeds threshold
+                    // (unless overheating warning takes priority).
+                    let compute_active = config.effects.enable_compute_effect
+                        && !is_overheating
+                        && max_aiclk_mhz > config.effects.compute_clock_threshold_mhz;
+
                     // Periodic status logging (every 10 seconds).
                     if last_log_time.elapsed() >= Duration::from_secs(10) {
-                        info!(
-                            "Status: {:.1}°C (max) | {:.1}W | RGB: #{:02X}{:02X}{:02X} @ {:.0}%",
-                            hottest.max_temp,
-                            hottest.power_watts,
-                            color.r,
-                            color.g,
-                            color.b,
-                            final_brightness * 100.0
-                        );
+                        if compute_active {
+                            info!(
+                                "Status: {:.1}°C (max) | {:.1}W | AICLK: {} MHz | RGB: mode '{}' (Tensix compute)",
+                                hottest.max_temp,
+                                hottest.power_watts,
+                                max_aiclk_mhz,
+                                config.effects.compute_mode
+                            );
+                        } else {
+                            info!(
+                                "Status: {:.1}°C (max) | {:.1}W | AICLK: {} MHz | RGB: #{:02X}{:02X}{:02X} @ {:.0}%",
+                                hottest.max_temp,
+                                hottest.power_watts,
+                                max_aiclk_mhz,
+                                color.r,
+                                color.g,
+                                color.b,
+                                final_brightness * 100.0
+                            );
+                        }
                         last_log_time = Instant::now();
                     }
 
                     PollResult::Good(Display {
                         color,
                         brightness: final_brightness,
+                        compute_active,
                     })
                 }
             }
@@ -272,34 +299,69 @@ async fn main() -> Result<()> {
         // Ask the controller what to display and push it to the LEDs, keeping
         // the existing anti-flicker throttle (color changed + min interval).
         if let Some(display) = controller.record(result, now) {
-            let color = display.color;
-            let final_brightness = display.brightness;
-
-            let color_changed = if let Some((last_color, last_brightness)) = last_rgb_color {
-                (color.r as i16 - last_color.r as i16).abs() > 5
-                    || (color.g as i16 - last_color.g as i16).abs() > 5
-                    || (color.b as i16 - last_color.b as i16).abs() > 5
-                    || (final_brightness - last_brightness).abs() > 0.05
-            } else {
-                true // First update
-            };
-
-            if color_changed && last_rgb_update.elapsed() >= min_rgb_update_interval {
-                if let Some(controller_rgb) = rgb_controller.as_mut() {
-                    // All zone strategies currently render unified (per-device /
-                    // gradient remain TODO).
-                    if !matches!(config.openrgb.zone_strategy, config::ZoneStrategy::Unified) {
-                        warn_once!("Only unified zone strategy is implemented; using unified");
-                    }
-                    if let Err(e) = controller_rgb.set_all(color, final_brightness) {
-                        error!("Failed to update RGB lights: {}", e);
+            if display.compute_active {
+                if !last_compute_active {
+                    if let Some(controller_rgb) = rgb_controller.as_mut() {
+                        if let Err(e) = controller_rgb.set_mode(&config.effects.compute_mode) {
+                            error!("Failed to activate compute RGB mode '{}': {}", config.effects.compute_mode, e);
+                        } else {
+                            last_compute_active = true;
+                            last_rgb_color = None;
+                            last_rgb_update = Instant::now();
+                            info!(
+                                "Tensix compute active (AICLK {} MHz > {} MHz) — switched RGB to '{}' mode",
+                                last_max_aiclk_mhz,
+                                config.effects.compute_clock_threshold_mhz,
+                                config.effects.compute_mode
+                            );
+                        }
                     } else {
-                        last_rgb_color = Some((color, final_brightness));
-                        last_rgb_update = Instant::now();
-                        info!(
-                            "Updated RGB to #{:02X}{:02X}{:02X} @ {:.0}%",
-                            color.r, color.g, color.b, final_brightness * 100.0
-                        );
+                        last_compute_active = true;
+                    }
+                }
+            } else {
+                let color = display.color;
+                let final_brightness = display.brightness;
+                let exited_compute = last_compute_active;
+
+                let color_changed = if exited_compute {
+                    true
+                } else if let Some((last_color, last_brightness)) = last_rgb_color {
+                    (color.r as i16 - last_color.r as i16).abs() > 5
+                        || (color.g as i16 - last_color.g as i16).abs() > 5
+                        || (color.b as i16 - last_color.b as i16).abs() > 5
+                        || (final_brightness - last_brightness).abs() > 0.05
+                } else {
+                    true // First update
+                };
+
+                if color_changed && (exited_compute || last_rgb_update.elapsed() >= min_rgb_update_interval) {
+                    if let Some(controller_rgb) = rgb_controller.as_mut() {
+                        // All zone strategies currently render unified (per-device /
+                        // gradient remain TODO).
+                        if !matches!(config.openrgb.zone_strategy, config::ZoneStrategy::Unified) {
+                            warn_once!("Only unified zone strategy is implemented; using unified");
+                        }
+                        if let Err(e) = controller_rgb.set_all(color, final_brightness) {
+                            error!("Failed to update RGB lights: {}", e);
+                        } else {
+                            if exited_compute {
+                                info!(
+                                    "Tensix compute idle (AICLK {} MHz <= {} MHz) — returning to thermal RGB mode",
+                                    last_max_aiclk_mhz,
+                                    config.effects.compute_clock_threshold_mhz
+                                );
+                            }
+                            last_compute_active = false;
+                            last_rgb_color = Some((color, final_brightness));
+                            last_rgb_update = Instant::now();
+                            info!(
+                                "Updated RGB to #{:02X}{:02X}{:02X} @ {:.0}%",
+                                color.r, color.g, color.b, final_brightness * 100.0
+                            );
+                        }
+                    } else {
+                        last_compute_active = false;
                     }
                 }
             }
@@ -355,19 +417,20 @@ fn print_metrics_table(metrics: &[monitoring::DeviceMetrics]) {
     println!("{:^80}", "Tenstorrent Device Metrics");
     println!("{:=<80}", "");
     println!(
-        "{:<15} {:<10} {:<12} {:>10} {:>10} {:>8}",
-        "Bus ID", "Board", "Architecture", "Temp (°C)", "Power (W)", "Fan RPM"
+        "{:<15} {:<10} {:<12} {:>10} {:>10} {:>11} {:>8}",
+        "Bus ID", "Board", "Architecture", "Temp (°C)", "Power (W)", "AICLK (MHz)", "Fan RPM"
     );
     println!("{:-<80}", "");
 
     for m in metrics {
         println!(
-            "{:<15} {:<10} {:<12} {:>10.1} {:>10.1} {:>8}",
+            "{:<15} {:<10} {:<12} {:>10.1} {:>10.1} {:>11} {:>8}",
             m.bus_id,
             m.board_type,
             m.architecture,
             m.max_temp,
             m.power_watts,
+            m.aiclk_mhz,
             m.fan_rpm
         );
 

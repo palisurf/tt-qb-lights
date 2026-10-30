@@ -139,11 +139,26 @@ pub struct EffectsConfig {
 
     /// Pulse speed in milliseconds
     pub pulse_speed_ms: u64,
+
+    /// Enable rolling effect when Tensix clock speed exceeds threshold
+    #[serde(default = "default_enable_compute_effect")]
+    pub enable_compute_effect: bool,
+
+    /// AICLK threshold in MHz above which compute effect activates (default: 800)
+    #[serde(default = "default_compute_clock_threshold_mhz")]
+    pub compute_clock_threshold_mhz: u32,
+
+    /// OpenRGB hardware mode to activate while computing (default: "Rainbow")
+    #[serde(default = "default_compute_mode")]
+    pub compute_mode: String,
 }
 
 fn default_min_brightness() -> f32 { 0.3 }
 fn default_max_brightness() -> f32 { 1.0 }
 fn default_warning_temp() -> f32 { 70.0 }
+fn default_enable_compute_effect() -> bool { true }
+fn default_compute_clock_threshold_mhz() -> u32 { 800 }
+fn default_compute_mode() -> String { "Rainbow".to_string() }
 
 /// Logging configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -332,6 +347,9 @@ impl Config {
         if self.monitoring.max_poll_interval_ms < self.monitoring.poll_interval_ms {
             anyhow::bail!("max_poll_interval_ms must be >= poll_interval_ms");
         }
+        if self.effects.enable_compute_effect && self.effects.compute_mode.trim().is_empty() {
+            anyhow::bail!("compute_mode cannot be empty when enable_compute_effect is true");
+        }
 
         Ok(())
     }
@@ -391,6 +409,9 @@ mod tests {
                 enable_warning_pulse: true,
                 warning_temp_threshold: 70.0,
                 pulse_speed_ms: 500,
+                enable_compute_effect: true,
+                compute_clock_threshold_mhz: 800,
+                compute_mode: "Rainbow".to_string(),
             },
             logging: LoggingConfig::default(),
         }
