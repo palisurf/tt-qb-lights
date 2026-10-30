@@ -1,7 +1,7 @@
 [Unit]
 Description=Tenstorrent RGB Lighting Controller
 Documentation=file:///home/ttuser/code/tt-qb-lights/README.md
-After=network.target multi-user.target openrgb.service
+After=network.target openrgb.service
 Wants=openrgb.service
 Requires=openrgb.service
 
